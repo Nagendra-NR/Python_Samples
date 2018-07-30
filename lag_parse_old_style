@@ -1,0 +1,202 @@
+
+import argparse
+
+import schedule
+import time
+from datetime import datetime
+import threading
+import re
+import csv
+
+'''
+parser = argparse.ArgumentParser(description='This script will parse the input diameter log file '
+                                             'and generates the SCEF counters in .csv format. '
+                                'The configuration file, <filename> is used to set the duration')
+
+
+parser.add_argument('logFile', metavar="INPUT_LOG_FILE", help='absolute path of Diameter Adapter logfile')
+parser.add_argument('outputdir', metavar = "OUTPUT_DIR", help='Output directory where counterfiles needs to be generated')
+
+
+parser.add_argument('--sum', dest='accumulate', action='store_const',
+                    const=sum, default=max,
+                    help='sum the integers (default: find the max)')
+
+
+args = parser.parse_args()
+#print(args.accumalate(args.logFile))
+
+if(args.logFile):
+    print("Logfile : ", logFile)
+else :
+    print("No log file mentioned")
+'''
+
+logFile = "testlog1.log"
+
+try:
+    fh = open(logFile, "r")
+    position = fh.seek(0, 2)  # Go to end of file
+except IOError:
+    exit("Log file not found : " + logFile)
+
+
+print("Start parsing from position : ", position)
+
+
+def parselogfile(file_data):
+    file_split_data = re.split('\n', file_data)
+    final_list = []
+
+    command_pattern = re.compile('Diameter command: ([\d]+)\]#')
+    mtr_command_pattern = re.compile('Command=([\d]+)')
+    no_of_avp_pattern = re.compile('Diameter AVP size: ([\d]+)\]#')
+    avp_code_pattern = re.compile('AVP code: ([\d]+)')
+    mtr_end_pattern = re.compile('^]]#')
+    mtr_avp_pattern = re.compile('DiameterAVP \[code=([\d]+)')
+
+    diameter_message = {}
+    process_command = False
+    process_mtr_command = False
+    nextline = False
+    avp_parsed_count = 0
+
+    for line in file_split_data:
+        if process_command:
+            if nextline:
+                no_of_avp_found = re.search(no_of_avp_pattern, line)
+                if no_of_avp_found:
+                    no_of_avp = no_of_avp_found.group(1)
+                    avp_parsed_count = int(no_of_avp)
+                nextline = False
+                continue
+            else:
+                avp_code_found = re.search(avp_code_pattern, line)
+                if avp_code_found:
+                    avp_parsed_count = avp_parsed_count - 1
+                    avp_code = avp_code_found.group(1)
+                    if avp_code == "4315":
+                        payload = line.split("OctetString(Binary)=", 1)[1].count(', ') + 1
+                        diameter_message['payload'] = payload
+                    if avp_parsed_count == 0:
+                        process_command = False
+                else:
+                    continue
+        elif process_mtr_command:
+            mtr_avp_found = re.search(mtr_avp_pattern, line)
+            mtr_end_found = re.search(mtr_end_pattern, line)
+            if mtr_avp_found:
+                mtr_avp_code = mtr_avp_found.group(1)
+                if mtr_avp_code == "4315":
+                    payload = line.split("OctetString(Binary)=", 1)[1].count(', ') + 1
+                    diameter_message['payload'] = payload
+            elif mtr_end_found:
+                process_mtr_command = False
+        else:
+            command_found = re.search(command_pattern, line)
+            if command_found:
+                final_list.append(diameter_message)
+                diameter_message = {}
+                diameter_message.clear()
+                diameter_message['CommandCode'] = command_found.group(1)
+                process_command = True
+                nextline = True
+                continue
+            else:
+                mtr_command_found = re.search(mtr_command_pattern, line)
+                if mtr_command_found:
+                    final_list.append(diameter_message)
+                    diameter_message = {}
+                    diameter_message['CommandCode'] = mtr_command_found.group(1)
+                    process_mtr_command = True  # nextline is not used here
+                else:
+                    process_command = False
+
+    final_list.append(diameter_message)
+    # diameter_message = {}
+
+    print("Diameter messages : ", final_list)
+
+    uplink_payload_list = []
+    downlink_payload_list = []
+
+    average_packetsize_of_session_uplink = 0
+    average_packetsize_of_session_downlink = 0
+    connection_management_attempts = 0
+    no_of_odr = 0
+    no_of_tdr = 0
+
+    duration = 10
+
+    for i, entry in enumerate(final_list):
+        command_code = int(entry.get('CommandCode', 0))
+        if command_code == 8388732:
+            connection_management_attempts = connection_management_attempts + 1
+        elif command_code == 8388733:
+            no_of_odr = no_of_odr + 1
+            payload = int(entry.get('payload', 0))
+            uplink_payload_list.append(payload)
+        elif command_code == 8388734:
+            no_of_tdr = no_of_tdr + 1
+            payload = int(entry.get('payload', 0))
+            downlink_payload_list.append(payload)
+
+    average_throughput_of_session_downlink = no_of_odr / duration
+    average_throughput_of_session_uplink = no_of_tdr / duration
+    total_payload_of_session_uplink = sum(uplink_payload_list)
+    total_paylaod_of_session_downlink = sum(downlink_payload_list)
+
+    if len(uplink_payload_list):
+        average_packetsize_of_session_uplink = total_payload_of_session_uplink / len(uplink_payload_list)
+    if len(downlink_payload_list):
+        average_packetsize_of_session_downlink = total_paylaod_of_session_downlink / len(downlink_payload_list)
+
+    print("uplink payload list", uplink_payload_list)
+    print("downlink payload list", downlink_payload_list)
+    print("average_throughput_of_session_downlink : ", average_throughput_of_session_downlink)
+    print("average_throughput_of_session_uplink : ", average_throughput_of_session_uplink)
+    print("total_paylaod_of_session_downlink : ", total_paylaod_of_session_downlink)
+    print("total_payload_of_session_uplink : ", total_payload_of_session_uplink)
+    print("average_packetsize_of_session_downlink : ", average_packetsize_of_session_downlink)
+    print("average_packetsize_of_session_uplink : ", average_packetsize_of_session_uplink)
+    print("connection_management_attempts : ", connection_management_attempts)
+
+    # Category,SubCategory,APN,Name,Cause,SubCause,Type,From,To,Value
+    # Name : “DLTHRU”, “ULTHRU”, “DLPL”,”ULPL”, “DLAPL”,”ULAPL”,”CMA”
+    with open('example4.csv', 'w') as csvfile:
+        fieldnames = ['Category', 'SubCategory', 'APN', 'Name', 'Cause', 'SubCause', 'Type', 'From', 'To', 'Value']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow({'Category': 'SCEF', 'SubCategory': 'AP', 'APN': 'Default', 'Type': 'G', 'Name': 'DLTHRU',
+                         'Value': average_throughput_of_session_downlink})
+        writer.writerow({'Category': 'SCEF', 'SubCategory': 'AP', 'APN': 'Default', 'Type': 'G', 'Name': 'ULTHRU',
+                         'Value': average_throughput_of_session_uplink})
+        writer.writerow({'Category': 'SCEF', 'SubCategory': 'AP', 'APN': 'Default', 'Type': 'G', 'Name': 'DLPL',
+                         'Value': total_paylaod_of_session_downlink})
+        writer.writerow({'Category': 'SCEF', 'SubCategory': 'AP', 'APN': 'Default', 'Type': 'G', 'Name': 'ULPL',
+                         'Value': total_payload_of_session_uplink})
+        writer.writerow({'Category': 'SCEF', 'SubCategory': 'AP', 'APN': 'Default', 'Type': 'G', 'Name': 'DLAPL',
+                         'Value': average_packetsize_of_session_downlink})
+        writer.writerow({'Category': 'SCEF', 'SubCategory': 'AP', 'APN': 'Default', 'Type': 'G', 'Name': 'ULAPL',
+                         'Value': average_packetsize_of_session_uplink})
+        writer.writerow({'Category': 'SCEF', 'SubCategory': 'AP', 'APN': 'Default', 'Type': 'G', 'Name': 'CMA',
+                         'Value': connection_management_attempts})
+
+
+def job():
+    global position
+    print("------------------------------------------------------------------------------------------------------")
+    print("Parsing Started.  Time : ", datetime.now())
+    fh.seek(position)
+    file_data = fh.read()
+    position = fh.tell()
+    th = threading.Thread(target=parselogfile, args=(file_data,))
+    th.start()
+    # print("Current number of active threads : ", threading.active_count())
+
+
+schedule.every(5).seconds.do(job)
+
+while True:
+    schedule.run_pending()
+    time.sleep(1)
